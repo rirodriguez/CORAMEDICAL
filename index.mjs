@@ -18,6 +18,22 @@ let state = "CONECTANDO";
 let qrDataUrl = null;
 let myPhone = null;
 const sentByBot = new Set(); // IDs enviados por el bot: no deben activar la pausa humana
+// Caché de mensajes enviados: WhatsApp pide reenviarlos cuando otro dispositivo no puede descifrarlos
+// ("Esperando el mensaje"). Sin esto, el mensaje queda atascado para siempre.
+const msgStore = new Map();
+const MAX_STORE = 2000;
+function remember(id, message) {
+  if (!id || !message) return;
+  msgStore.set(id, message);
+  if (msgStore.size > MAX_STORE) msgStore.delete(msgStore.keys().next().value);
+}
+const retryCounts = new Map();
+const msgRetryCounterCache = {
+  get: (k) => retryCounts.get(k),
+  set: (k, v) => { retryCounts.set(k, v); if (retryCounts.size > 5000) retryCounts.delete(retryCounts.keys().next().value); },
+  del: (k) => retryCounts.delete(k),
+  flushAll: () => retryCounts.clear(),
+};
 
 const digits = (s) => String(s || "").replace(/\D/g, "");
 /** Número real del chat (WhatsApp nuevo puede usar identificadores @lid). */
@@ -43,7 +59,10 @@ async function start() {
   fs.mkdirSync(AUTH_DIR, { recursive: true });
   const { state: auth, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: undefined }));
-  sock = makeWASocket({ auth, version, logger: log, browser: ["CoraSys", "Chrome", "1.0"], markOnlineOnConnect: false, syncFullHistory: false });
+  sock = makeWASocket({ auth, version, logger: log, browser: ["CoraSys", "Chrome", "1.0"], markOnlineOnConnect: false, syncFullHistory: false,
+    msgRetryCounterCache,
+    getMessage: async (key) => msgStore.get(key.id) || undefined,
+  });
   sock.ev.on("creds.update", saveCreds);
   sock.ev.on("connection.update", async (u) => {
     if (u.qr) { state = "ESPERANDO_QR"; qrDataUrl = await QRCode.toDataURL(u.qr, { margin: 1, width: 320 }); }
@@ -59,6 +78,7 @@ async function start() {
     if (type !== "notify" && type !== "append") return;
     for (const m of messages) {
       const id = m.key.id;
+      if (m.message) remember(id, m.message);
       const jid = m.key.remoteJid || "";
       if (!m.message || jid.endsWith("@g.us") || jid === "status@broadcast" || jid.endsWith("@newsletter")) continue;
       if (m.key.fromMe && sentByBot.has(id)) { sentByBot.delete(id); continue; }
@@ -100,7 +120,7 @@ http.createServer(async (req, res) => {
       await sock.sendPresenceUpdate("composing", jid).catch(() => {});
       await new Promise((r) => setTimeout(r, Math.min(3000, 800 + String(text).length * 15))); // tipeo natural
       const sent = await sock.sendMessage(jid, { text: String(text).slice(0, 4000) });
-      if (sent?.key?.id) sentByBot.add(sent.key.id);
+      if (sent?.key?.id) { sentByBot.add(sent.key.id); remember(sent.key.id, sent.message); }
       await sock.sendPresenceUpdate("paused", jid).catch(() => {});
       return json(res, 200, { ok: true });
     }
