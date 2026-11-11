@@ -1,7 +1,7 @@
 // Puente WhatsApp por cÃģdigo QR (dispositivo vinculado) para CoraSys.
 // Solo transporta mensajes: toda la lÃģgica (precios, stock, cotizaciones) vive en CoraSys.
 import http from "node:http";
-import makeWASocket, { DisconnectReason, useMultiFileAuthState, downloadMediaMessage, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } from "@whiskeysockets/baileys";
+import makeWASocket, { Browsers, DisconnectReason, useMultiFileAuthState, downloadMediaMessage, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
 import pino from "pino";
 import fs from "node:fs";
@@ -22,10 +22,15 @@ const sentByBot = new Set(); // IDs enviados por el bot: no deben activar la pau
 // ("Esperando el mensaje"). Sin esto, el mensaje queda atascado para siempre.
 const msgStore = new Map();
 const MAX_STORE = 2000;
+const STORE_FILE = (process.env.AUTH_DIR || "/data/auth") + "/../msgstore.json";
+try { for (const [k, v] of JSON.parse(fs.readFileSync(STORE_FILE, "utf8"))) msgStore.set(k, v); } catch {}
+let saveTimer = null;
 function remember(id, message) {
   if (!id || !message) return;
   msgStore.set(id, message);
   if (msgStore.size > MAX_STORE) msgStore.delete(msgStore.keys().next().value);
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => { try { fs.writeFileSync(STORE_FILE, JSON.stringify([...msgStore])); } catch {} }, 1000);
 }
 const retryCounts = new Map();
 const msgRetryCounterCache = {
@@ -59,7 +64,7 @@ async function start() {
   fs.mkdirSync(AUTH_DIR, { recursive: true });
   const { state: auth, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: undefined }));
-  sock = makeWASocket({ auth: { creds: auth.creds, keys: makeCacheableSignalKeyStore(auth.keys, log) }, version, logger: log, browser: ["CoraSys", "Chrome", "1.0"], markOnlineOnConnect: false, syncFullHistory: false,
+  sock = makeWASocket({ auth: { creds: auth.creds, keys: makeCacheableSignalKeyStore(auth.keys, log) }, version, logger: log, browser: Browsers.ubuntu("Chrome"), markOnlineOnConnect: true, syncFullHistory: false,
     msgRetryCounterCache,
     getMessage: async (key) => msgStore.get(key.id) || undefined,
   });
