@@ -1,7 +1,7 @@
-// Puente WhatsApp por código QR (dispositivo vinculado) para CoraSys.
-// Solo transporta mensajes: toda la lógica (precios, stock, cotizaciones) vive en CoraSys.
+// Puente WhatsApp por cÃģdigo QR (dispositivo vinculado) para CoraSys.
+// Solo transporta mensajes: toda la lÃģgica (precios, stock, cotizaciones) vive en CoraSys.
 import http from "node:http";
-import makeWASocket, { DisconnectReason, useMultiFileAuthState, downloadMediaMessage, fetchLatestBaileysVersion } from "@whiskeysockets/baileys";
+import makeWASocket, { DisconnectReason, useMultiFileAuthState, downloadMediaMessage, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
 import pino from "pino";
 import fs from "node:fs";
@@ -18,7 +18,7 @@ let state = "CONECTANDO";
 let qrDataUrl = null;
 let myPhone = null;
 const sentByBot = new Set(); // IDs enviados por el bot: no deben activar la pausa humana
-// Caché de mensajes enviados: WhatsApp pide reenviarlos cuando otro dispositivo no puede descifrarlos
+// CachÃĐ de mensajes enviados: WhatsApp pide reenviarlos cuando otro dispositivo no puede descifrarlos
 // ("Esperando el mensaje"). Sin esto, el mensaje queda atascado para siempre.
 const msgStore = new Map();
 const MAX_STORE = 2000;
@@ -36,7 +36,7 @@ const msgRetryCounterCache = {
 };
 
 const digits = (s) => String(s || "").replace(/\D/g, "");
-/** Número real del chat (WhatsApp nuevo puede usar identificadores @lid). */
+/** NÃšmero real del chat (WhatsApp nuevo puede usar identificadores @lid). */
 function phoneOf(key) {
   const jid = key.remoteJid || "";
   if (jid.endsWith("@s.whatsapp.net")) return digits(jid.split("@")[0]);
@@ -59,7 +59,7 @@ async function start() {
   fs.mkdirSync(AUTH_DIR, { recursive: true });
   const { state: auth, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: undefined }));
-  sock = makeWASocket({ auth, version, logger: log, browser: ["CoraSys", "Chrome", "1.0"], markOnlineOnConnect: false, syncFullHistory: false,
+  sock = makeWASocket({ auth: { creds: auth.creds, keys: makeCacheableSignalKeyStore(auth.keys, log) }, version, logger: log, browser: ["CoraSys", "Chrome", "1.0"], markOnlineOnConnect: false, syncFullHistory: false,
     msgRetryCounterCache,
     getMessage: async (key) => msgStore.get(key.id) || undefined,
   });
