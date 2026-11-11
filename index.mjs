@@ -60,6 +60,15 @@ async function forward(payload) {
   console.error("No se pudo entregar el mensaje", payload.id);
 }
 
+function clearAuthDir(dir) {
+  try {
+    if (!fs.existsSync(dir)) return;
+    for (const f of fs.readdirSync(dir)) {
+      try { fs.rmSync(dir + "/" + f, { recursive: true, force: true }); } catch (e) { console.error("No se pudo borrar", f, e.message); }
+    }
+  } catch (e) { console.error("Error limpiando credenciales:", e.message); }
+}
+
 async function start() {
   fs.mkdirSync(AUTH_DIR, { recursive: true });
   const { state: auth, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -74,7 +83,7 @@ async function start() {
     if (u.connection === "open") { state = "CONECTADO"; qrDataUrl = null; myPhone = digits(sock.user?.id?.split(":")[0]); console.log("Conectado", myPhone); }
     if (u.connection === "close") {
       const code = u.lastDisconnect?.error?.output?.statusCode;
-      if (code === DisconnectReason.loggedOut) { state = "DESCONECTADO"; fs.rmSync(AUTH_DIR, { recursive: true, force: true }); }
+      if (code === DisconnectReason.loggedOut) { state = "DESCONECTADO"; clearAuthDir(AUTH_DIR); }
       else state = "CONECTANDO";
       setTimeout(start, 3000);
     }
