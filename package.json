@@ -7,7 +7,7 @@
   "scripts": { "start": "node index.mjs" },
   "engines": { "node": ">=20" },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.18",
+    "baileys": "7.0.0-rc14",
     "pino": "^9.5.0",
     "qrcode": "^1.5.4"
   }
