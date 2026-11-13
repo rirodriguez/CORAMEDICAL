@@ -1,7 +1,7 @@
-// Puente WhatsApp por cÃģdigo QR (dispositivo vinculado) para CoraSys.
-// Solo transporta mensajes: toda la lÃģgica (precios, stock, cotizaciones) vive en CoraSys.
+// Puente WhatsApp por código QR (dispositivo vinculado) para CoraSys.
+// Solo transporta mensajes: toda la lógica (precios, stock, cotizaciones) vive en CoraSys.
 import http from "node:http";
-import makeWASocket, { Browsers, DisconnectReason, useMultiFileAuthState, downloadMediaMessage, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } from "@whiskeysockets/baileys";
+import makeWASocket, { Browsers, DisconnectReason, useMultiFileAuthState, downloadMediaMessage, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } from "baileys";
 import QRCode from "qrcode";
 import pino from "pino";
 import fs from "node:fs";
@@ -13,12 +13,24 @@ const AUTH_DIR = process.env.AUTH_DIR || "/data/auth";
 if (!API_KEY || !WEBHOOK) { console.error("Faltan API_KEY o CORASYS_WEBHOOK_URL"); process.exit(1); }
 
 const log = pino({ level: "warn" });
+// libsignal imprime sesiones completas (llaves privadas) con console.*: se filtran y solo se cuentan.
+const SIGNAL_NOISE = /^(Closing session|Closing open session|Session error|Failed to decrypt|Removing old closed session|Decrypted message with closed session|Migrating session)/;
+for (const k of ["log", "info", "warn", "error"]) {
+  const orig = console[k].bind(console);
+  console[k] = (...a) => {
+    const first = a[0];
+    if ((typeof first === "string" && SIGNAL_NOISE.test(first)) || (first && typeof first === "object" && first.constructor?.name === "SessionEntry")) { signalStats.noise++; return; }
+    orig(...a);
+  };
+}
+const signalStats = { noise: 0 };
+let connSeq = 0;
 let sock = null;
 let state = "CONECTANDO";
 let qrDataUrl = null;
 let myPhone = null;
 const sentByBot = new Set(); // IDs enviados por el bot: no deben activar la pausa humana
-// CachÃĐ de mensajes enviados: WhatsApp pide reenviarlos cuando otro dispositivo no puede descifrarlos
+// Caché de mensajes enviados: WhatsApp pide reenviarlos cuando otro dispositivo no puede descifrarlos
 // ("Esperando el mensaje"). Sin esto, el mensaje queda atascado para siempre.
 const msgStore = new Map();
 const MAX_STORE = 2000;
@@ -40,12 +52,33 @@ const msgRetryCounterCache = {
   flushAll: () => retryCounts.clear(),
 };
 
+// Chat real de cada cliente (@lid o número): se responde siempre al mismo para no romper el cifrado.
+const CHATS_FILE = (process.env.AUTH_DIR || "/data/auth") + "/../chats.json";
+const chatOf = new Map();
+try { for (const [k, v] of JSON.parse(fs.readFileSync(CHATS_FILE, "utf8"))) chatOf.set(k, v); } catch {}
+let chatsTimer = null;
+function rememberChat(phone, jid) {
+  if (!phone || !jid || chatOf.get(phone) === jid) return;
+  chatOf.set(phone, jid);
+  clearTimeout(chatsTimer);
+  chatsTimer = setTimeout(() => { try { fs.writeFileSync(CHATS_FILE, JSON.stringify([...chatOf])); } catch (e) { console.error("No se pudo guardar chats:", e.message); } }, 500);
+}
+// Envíos en fila por chat: nunca dos cifrados simultáneos al mismo cliente.
+const sendQueues = new Map();
+function enqueue(jid, fn) {
+  const prev = sendQueues.get(jid) || Promise.resolve();
+  const next = prev.catch(() => {}).then(fn);
+  sendQueues.set(jid, next);
+  next.finally(() => { if (sendQueues.get(jid) === next) sendQueues.delete(jid); }).catch(() => {});
+  return next;
+}
+
 const digits = (s) => String(s || "").replace(/\D/g, "");
-/** NÃšmero real del chat (WhatsApp nuevo puede usar identificadores @lid). */
+/** Número real del chat (WhatsApp nuevo puede usar identificadores @lid). */
 function phoneOf(key) {
   const jid = key.remoteJid || "";
   if (jid.endsWith("@s.whatsapp.net")) return digits(jid.split("@")[0]);
-  const alt = key.remoteJidAlt || key.senderPn || key.participantPn || "";
+  const alt = key.remoteJidAlt || key.senderPn || key.participantAlt || key.participantPn || "";
   return alt ? digits(alt.split("@")[0]) : null;
 }
 
@@ -69,7 +102,20 @@ function clearAuthDir(dir) {
   } catch (e) { console.error("Error limpiando credenciales:", e.message); }
 }
 
+let starting = false;
 async function start() {
+  if (starting) return;
+  starting = true;
+  try {
+    if (sock) { try { sock.ev.removeAllListeners(); sock.end(undefined); } catch {} sock = null; }
+    await connect();
+  } finally { starting = false; }
+}
+let reconnectTimer = null;
+function scheduleReconnect(ms) { clearTimeout(reconnectTimer); reconnectTimer = setTimeout(start, ms); }
+
+async function connect() {
+  const conn = ++connSeq;
   fs.mkdirSync(AUTH_DIR, { recursive: true });
   const { state: auth, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: undefined }));
@@ -77,15 +123,18 @@ async function start() {
     msgRetryCounterCache,
     getMessage: async (key) => msgStore.get(key.id) || undefined,
   });
-  sock.ev.on("creds.update", saveCreds);
+  const current = sock;
+  sock.ev.on("creds.update", async () => { try { await saveCreds(); } catch (e) { console.error(`[c${conn}] No se pudieron guardar credenciales:`, e.message); } });
   sock.ev.on("connection.update", async (u) => {
     if (u.qr) { state = "ESPERANDO_QR"; qrDataUrl = await QRCode.toDataURL(u.qr, { margin: 1, width: 320 }); }
-    if (u.connection === "open") { state = "CONECTADO"; qrDataUrl = null; myPhone = digits(sock.user?.id?.split(":")[0]); console.log("Conectado", myPhone); }
+    if (u.connection === "open") { state = "CONECTADO"; qrDataUrl = null; myPhone = digits(sock.user?.id?.split(":")[0]); console.log(`[c${conn}] Conectado`, myPhone); }
     if (u.connection === "close") {
+      if (current !== sock) return; // conexión vieja: ignorar
       const code = u.lastDisconnect?.error?.output?.statusCode;
       if (code === DisconnectReason.loggedOut) { state = "DESCONECTADO"; clearAuthDir(AUTH_DIR); }
       else state = "CONECTANDO";
-      setTimeout(start, 3000);
+      console.log(`[c${conn}] Conexión cerrada (código ${code}); reconectando`);
+      scheduleReconnect(3000);
     }
   });
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
@@ -98,6 +147,7 @@ async function start() {
       if (m.key.fromMe && sentByBot.has(id)) { sentByBot.delete(id); continue; }
       const from = phoneOf(m.key);
       if (!from) continue;
+      rememberChat(from, jid);
       const msg = m.message.ephemeralMessage?.message || m.message;
       const text = msg.conversation || msg.extendedTextMessage?.text || msg.imageMessage?.caption || msg.documentMessage?.caption || undefined;
       const payload = { id, from, fromMe: !!m.key.fromMe, type: "other", text };
@@ -126,20 +176,23 @@ http.createServer(async (req, res) => {
   if (req.url === "/health") return json(res, 200, { ok: true });
   if (req.headers["x-api-key"] !== API_KEY) return json(res, 401, { error: "unauthorized" });
   try {
-    if (req.method === "GET" && req.url === "/status") return json(res, 200, { state, phone: myPhone, qr: qrDataUrl });
+    if (req.method === "GET" && req.url === "/status") return json(res, 200, { state, phone: myPhone, qr: qrDataUrl, conexion: connSeq, erroresCifrado: signalStats.noise });
     if (req.method === "POST" && req.url === "/send") {
       const { to, text } = JSON.parse(await readBody(req));
       if (state !== "CONECTADO") return json(res, 503, { error: "WhatsApp no conectado" });
-      const jid = `${digits(to)}@s.whatsapp.net`;
-      await sock.sendPresenceUpdate("composing", jid).catch(() => {});
-      await new Promise((r) => setTimeout(r, Math.min(3000, 800 + String(text).length * 15))); // tipeo natural
-      const sent = await sock.sendMessage(jid, { text: String(text).slice(0, 4000) });
-      if (sent?.key?.id) { sentByBot.add(sent.key.id); remember(sent.key.id, sent.message); }
-      await sock.sendPresenceUpdate("paused", jid).catch(() => {});
+      const jid = chatOf.get(digits(to)) || `${digits(to)}@s.whatsapp.net`;
+      await enqueue(jid, async () => {
+        await sock.sendPresenceUpdate("composing", jid).catch(() => {});
+        await new Promise((r) => setTimeout(r, Math.min(3000, 800 + String(text).length * 15))); // tipeo natural
+        const sent = await sock.sendMessage(jid, { text: String(text).slice(0, 4000) });
+        if (sent?.key?.id) { sentByBot.add(sent.key.id); remember(sent.key.id, sent.message); }
+        console.log(`[c${connSeq}] Enviado a ${jid.endsWith("@lid") ? "lid" : "número"} id=${sent?.key?.id}`);
+        await sock.sendPresenceUpdate("paused", jid).catch(() => {});
+      });
       return json(res, 200, { ok: true });
     }
     if (req.method === "POST" && req.url === "/logout") { await sock?.logout().catch(() => {}); return json(res, 200, { ok: true }); }
-    if (req.method === "POST" && req.url === "/restart") { sock?.end(undefined); return json(res, 200, { ok: true }); }
+    if (req.method === "POST" && req.url === "/restart") { scheduleReconnect(100); return json(res, 200, { ok: true }); }
     json(res, 404, { error: "not found" });
   } catch (e) { console.error(e); json(res, 500, { error: "error" }); }
 }).listen(PORT, () => console.log("Puente QR en puerto", PORT));
