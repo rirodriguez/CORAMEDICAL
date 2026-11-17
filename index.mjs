@@ -163,7 +163,7 @@ async function connect() {
           if (buf.length <= 10 * 1024 * 1024) payload.media = { base64: buf.toString("base64"), mime: (msg.imageMessage || msg.documentMessage).mimetype || "image/jpeg" };
         } catch (e) { log.warn(e); }
       }
-      if (!m.key.fromMe) await sock.readMessages([m.key]).catch(() => {});
+      // No se marca como leído: así el teléfono sigue notificando y el chat queda sin leer.
       forward(payload);
     }
   });
