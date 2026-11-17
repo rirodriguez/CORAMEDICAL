@@ -1,14 +1,13 @@
-{
-  "name": "corasys-whatsapp-gateway",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
-  "main": "index.mjs",
-  "scripts": { "start": "node index.mjs" },
-  "engines": { "node": ">=20" },
-  "dependencies": {
-    "baileys": "7.0.0-rc14",
-    "pino": "^9.5.0",
-    "qrcode": "^1.5.4"
-  }
-}
+name	"corasys-whatsapp-gateway"
+version	"1.0.0"
+private	true
+type	"module"
+main	"index.mjs"
+scripts	
+start	"node index.mjs"
+engines	
+node	">=20"
+dependencies	
+baileys	"7.0.0-rc14"
+pino	"^9.5.0"
+qrcode	"^1.5.4"
